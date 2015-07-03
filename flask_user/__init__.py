@@ -54,6 +54,7 @@ class UserManager(object):
                 email_action_view_function=views.email_action,
                 forgot_password_view_function=views.forgot_password,
                 login_view_function=views.login,
+                cas_view_function=views.cas,
                 logout_view_function=views.logout,
                 manage_emails_view_function=views.manage_emails,
                 register_view_function=views.register,
@@ -94,6 +95,7 @@ class UserManager(object):
         self.forgot_password_view_function = forgot_password_view_function
         self.login_view_function = login_view_function
         self.logout_view_function = logout_view_function
+        self.cas_view_function = cas_view_function
         self.manage_emails_view_function = manage_emails_view_function
         self.register_view_function = register_view_function
         self.resend_confirm_email_view_function = resend_confirm_email_view_function
@@ -145,6 +147,16 @@ class UserManager(object):
             self.password_crypt_context = CryptContext(
                     schemes=[app.config['USER_PASSWORD_HASH']])
 
+        # Setup CAS
+        if 'CAS_SERVER' in app.config:
+            self.support_cas = app.config['CAS_SERVER'] != None
+            self.cas_server = app.config['CAS_SERVER']
+            self.cas_service = app.config['CAS_SERVICE']
+        else:
+            self.support_cas = False
+            self.cas_server = None
+            self.cas_service = None
+
         # Setup Flask-Login
         self.setup_login_manager(app)
 
@@ -193,6 +205,7 @@ class UserManager(object):
         """ Add URL Routes"""
         app.add_url_rule('/home',  'user.home',  self.login_view_function,  methods=['GET', 'POST'])
         app.add_url_rule(self.login_url,  'user.login',  self.login_view_function,  methods=['GET', 'POST'])
+        app.add_url_rule("/user/cas",  'user.cas',  self.cas_view_function,  methods=['GET'])
         app.add_url_rule(self.logout_url, 'user.logout', self.logout_view_function, methods=['GET', 'POST'])
         if self.enable_confirm_email:
             app.add_url_rule(self.confirm_email_url, 'user.confirm_email', self.confirm_email_view_function)

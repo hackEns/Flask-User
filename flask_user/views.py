@@ -270,7 +270,61 @@ def login():
     return render_template(user_manager.login_template,
             form=login_form,
             login_form=login_form,
-            register_form=register_form)
+            register_form=register_form,
+            support_cas=user_manager.support_cas,
+            cas_server=user_manager.cas_server,
+            cas_service=user_manager.cas_service,
+            next=next)
+
+def cas():
+    """ Prompt for username/email and password and sign the user in."""
+    user_manager =  current_app.user_manager
+    db_adapter = user_manager.db_adapter
+
+    next = request.args.get('next', _endpoint_url(user_manager.after_login_endpoint))
+
+    if user_manager.support_cas:
+
+        ticket = request.args.get('ticket', '')
+
+        import urllib
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+
+        url = user_manager.cas_server + "/serviceValidate?ticket=" + ticket + "&service=" + user_manager.cas_service + "%2Fuser%2Fcas%3Fnext=" + next
+        cas_data = urllib.request.urlopen(url, context=ctx).read()
+
+        import xml.etree.ElementTree as ET
+
+        tr = ET.fromstring(cas_data)
+
+        print("URL requested to the cas:")
+        print(url)
+
+        print("DATA got from the cas:")
+        print(cas_data)
+
+        user_response = tr.findall("{http://www.yale.edu/tp/cas}authenticationSuccess/{http://www.yale.edu/tp/cas}user")
+        flask_user = None
+        if len(user_response) == 1:
+            [username] = user_response
+            flask_user = user_manager.find_user_by_username(username.text)
+            print(username)
+
+
+
+        # Immediately redirect already logged in users
+        if current_user.is_authenticated() and user_manager.auto_login_at_login:
+            return redirect(next)
+
+        if flask_user:
+            # Log user in
+            return _do_login_user(flask_user, next, False)
+    return login()
+
 
 def logout():
     """ Sign the user out."""
