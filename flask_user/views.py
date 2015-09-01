@@ -33,14 +33,13 @@ def confirm_email(token):
         flash(_('Invalid confirmation token.'), 'error')
         return redirect(url_for('user.login'))
 
-    # Confirm email by setting User.active=True and User.confirmed_at=utcnow()
+    # Confirm email by setting User.confirmed_at=utcnow() or UserEmail.confirmed_at=utcnow()
+    user = None
     if db_adapter.UserEmailClass:
         user_email = user_manager.get_user_email_by_id(object_id)
         if user_email:
             user_email.confirmed_at = datetime.utcnow()
             user = user_email.user
-        else:
-            user = None
     else:
         user_email = None
         user = user_manager.get_user_by_id(object_id)
@@ -192,24 +191,10 @@ def forgot_password():
     # Process valid POST
     if request.method=='POST' and form.validate():
         email = form.email.data
-
-        # Find user by email
         user, user_email = user_manager.find_user_by_email(email)
+
         if user:
-            # Generate reset password link
-            token = user_manager.generate_token(int(user.get_id()))
-            reset_password_link = url_for('user.reset_password', token=token, _external=True)
-
-            # Send forgot password email
-            emails.send_forgot_password_email(user, user_email, reset_password_link)
-
-            # Store token
-            if hasattr(user, 'reset_password_token'):
-                db_adapter.update_object(user, reset_password_token=token)
-                db_adapter.commit()
-
-            # Send forgot_password signal
-            signals.user_forgot_password.send(current_app._get_current_object(), user=user)
+            user_manager.send_reset_password_email(email)
 
         # Prepare one-time system message
         flash(_("A reset password email has been sent to '%(email)s'. Open that email and follow the instructions to reset your password.", email=email), 'success')
@@ -473,6 +458,9 @@ def register():
         user_invite = db_adapter.find_first_object(db_adapter.UserInvitationClass, token=invite_token)
         if user_invite:
             register_form.invite_token.data = invite_token
+        else:
+            flash("Invalid invitation token", "error")
+            return redirect(url_for('user.login'))
 
     if request.method!='POST':
         login_form.next.data     = register_form.next.data     = next
@@ -574,7 +562,7 @@ def register():
                 # delete new User object if send  fails
                 db_adapter.delete_object(user)
                 db_adapter.commit()
-                raise e
+                raise
 
         # Send user_registered signal
         signals.user_registered.send(current_app._get_current_object(),
@@ -648,11 +636,12 @@ def invite():
             # delete new User object if send fails
             db_adapter.delete_object(user_invite)
             db_adapter.commit()
-            raise e
+            raise
 
         signals \
             .user_sent_invitation \
-            .send(current_app._get_current_object(), user_invite=user_invite)
+            .send(current_app._get_current_object(), user_invite=user_invite,
+                  form=invite_form)
 
         flash(_('Invitation has been sent.'), 'success')
         return redirect(next)
@@ -689,6 +678,9 @@ def reset_password(token):
     user_manager = current_app.user_manager
     db_adapter = user_manager.db_adapter
 
+    if current_user.is_authenticated():
+        logout_user()
+
     is_valid, has_expired, user_id = user_manager.verify_token(
             token,
             user_manager.reset_password_expiration)
@@ -712,6 +704,10 @@ def reset_password(token):
         flash(_('Your reset password token is invalid.'), 'error')
         return redirect(_endpoint_url(user_manager.login_endpoint))
 
+    # Mark email as confirmed
+    user_email = emails.get_primary_user_email(user)
+    user_email.confirmed_at = datetime.utcnow()
+
     # Initialize form
     form = user_manager.reset_password_form(request.form)
 
@@ -732,7 +728,7 @@ def reset_password(token):
             emails.send_password_changed_email(user)
 
         # Prepare one-time system message
-        flash(_("Your password has been reset successfully. Please sign in with your new password"), 'success')
+        flash(_("Your password has been reset successfully."), 'success')
 
         # Auto-login after reset password or redirect to login page
         next = request.args.get('next', _endpoint_url(user_manager.after_reset_password_endpoint))
@@ -836,7 +832,7 @@ def _do_login_user(user, next, remember_me=False):
     # Check if user account has been disabled
     if not user.is_active():
         flash(_('Your account has not been enabled.'), 'error')
-        return redirect(url_for('user.home'))
+        return redirect(url_for('user.login'))
 
     # Check if user has a confirmed email address
     user_manager = current_app.user_manager
@@ -845,7 +841,7 @@ def _do_login_user(user, next, remember_me=False):
             and not user.has_confirmed_email():
         url = url_for('user.resend_confirm_email')
         flash(_('Your email address has not yet been confirmed. Check your email Inbox and Spam folders for the confirmation email or <a href="%(url)s">Re-send confirmation email</a>.', url=url), 'error')
-        return redirect(url_for('user.home'))
+        return redirect(url_for('user.login'))
 
     # Use Flask-Login to sign in user
     #print('login_user: remember_me=', remember_me)
@@ -866,3 +862,5 @@ def _endpoint_url(endpoint):
     if endpoint:
         url = url_for(endpoint)
     return url
+
+

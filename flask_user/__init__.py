@@ -5,7 +5,7 @@
     :license: Simplified BSD License, see LICENSE.txt for more details."""
 
 from passlib.context import CryptContext
-from flask import Blueprint, current_app
+from flask import Blueprint, current_app, url_for
 from flask_login import LoginManager, UserMixin as LoginUserMixin, make_secure_token
 from flask_user.db_adapters import DBAdapter
 from .db_adapters import SQLAlchemyAdapter
@@ -16,6 +16,7 @@ from . import settings
 from . import tokens
 from . import translations
 from . import views
+from . import signals
 from .translations import get_translations
 
 # Enable the following: from flask.ext.user import current_user
@@ -23,8 +24,10 @@ from flask_login import current_user
 
 # Enable the following: from flask.ext.user import login_required, roles_required
 from .decorators import *
+# Enable the following: from flask.ext.user import user_logged_in
+from .signals import *
 
-__version__ = '0.6.1'
+__version__ = '0.6.7'
 
 def _flask_user_context_processor():
     """ Make 'user_manager' available to Jinja2 templates"""
@@ -33,7 +36,16 @@ def _flask_user_context_processor():
 class UserManager(object):
     """ This is the Flask-User object that manages the User management process."""
 
-    def __init__(self, db_adapter, app=None,
+    def __init__(self, db_adapter=None, app=None, **kwargs):
+        """ Create the UserManager object """
+        self.db_adapter = db_adapter
+        self.app = app
+
+        if db_adapter is not None and app is not None:
+            self.init_app(app, db_adapter, **kwargs)
+
+
+    def init_app(self, app, db_adapter=None,
                 # Forms
                 add_email_form=forms.AddEmailForm,
                 change_password_form=forms.ChangePasswordForm,
@@ -72,8 +84,10 @@ class UserManager(object):
                 token_manager=tokens.TokenManager(),
                 legacy_check_password_hash=None
                 ):
-        """ Initialize the UserManager with custom or built-in attributes"""
-        self.db_adapter = db_adapter
+        """ Initialize the UserManager object """
+        self.app = app
+        if db_adapter is not None:
+            self.db_adapter = db_adapter
         # Forms
         self.add_email_form = add_email_form
         self.change_password_form = change_password_form
@@ -112,11 +126,6 @@ class UserManager(object):
         self.send_email_function = send_email_function
         self.legacy_check_password_hash = legacy_check_password_hash
 
-        self.app = app
-        if app:
-            self.init_app(app)
-
-    def init_app(self, app):
         """ Initialize app.user_manager."""
         # Bind Flask-USER to app
         app.user_manager = self
@@ -203,7 +212,6 @@ class UserManager(object):
 
     def add_url_routes(self, app):
         """ Add URL Routes"""
-        app.add_url_rule('/home',  'user.home',  self.login_view_function,  methods=['GET', 'POST'])
         app.add_url_rule(self.login_url,  'user.login',  self.login_view_function,  methods=['GET', 'POST'])
         app.add_url_rule("/user/cas",  'user.cas',  self.cas_view_function,  methods=['GET'])
         app.add_url_rule(self.logout_url, 'user.logout', self.logout_view_function, methods=['GET', 'POST'])
@@ -350,6 +358,24 @@ class UserManager(object):
         # See if new_username is available
         return self.find_user_by_username(new_username)==None
 
+    def send_reset_password_email(self, email):
+        # Find user by email
+        user, user_email = self.find_user_by_email(email)
+        if user:
+            # Generate reset password link
+            token = self.generate_token(int(user.get_id()))
+            reset_password_link = url_for('user.reset_password', token=token, _external=True)
+
+            # Send forgot password email
+            emails.send_forgot_password_email(user, user_email, reset_password_link)
+
+            # Store token
+            if hasattr(user, 'reset_password_token'):
+                self.db_adapter.update_object(user, reset_password_token=token)
+                self.db_adapter.commit()
+
+            # Send forgot_password signal
+            signals.user_forgot_password.send(current_app._get_current_object(), user=user)
 
 
 class UserMixin(LoginUserMixin):
@@ -367,6 +393,40 @@ class UserMixin(LoginUserMixin):
             self.active = active
         else:
             self.is_enabled = active
+
+
+    def has_role(self, *specified_role_names):
+        """ Return True if the user has one of the specified roles. Return False otherwise.
+
+            has_roles() accepts a 1 or more role name parameters
+                has_role(role_name1, role_name2, role_name3).
+
+            For example:
+                has_roles('a', 'b')
+            Translates to:
+                User has role 'a' OR role 'b'
+        """
+
+        # Allow developers to attach the Roles to the User or the UserProfile object
+        if hasattr(self, 'roles'):
+            roles = self.roles
+        else:
+            if hasattr(self, 'user_profile') and hasattr(self.user_profile, 'roles'):
+                roles = self.user_profile.roles
+            else:
+                roles = None
+        if not roles: return False
+
+        # Translates a list of role objects to a list of role_names
+        user_role_names = [role.name for role in roles]
+
+        # Return True if one of the role_names matches
+        for role_name in specified_role_names:
+            if role_name in user_role_names:
+                return True
+
+        # Return False if none of the role_names matches
+        return False
 
 
     def has_roles(self, *requirements):
@@ -398,7 +458,7 @@ class UserMixin(LoginUserMixin):
         if not roles: return False
 
         # Translates a list of role objects to a list of role_names
-        user_roles = [role.name for role in roles]
+        user_role_names = [role.name for role in roles]
 
         # has_role() accepts a list of requirements
         for requirement in requirements:
@@ -407,7 +467,7 @@ class UserMixin(LoginUserMixin):
                 tuple_of_role_names = requirement
                 authorized = False
                 for role_name in tuple_of_role_names:
-                    if role_name in user_roles:
+                    if role_name in user_role_names:
                         # tuple_of_role_names requirement was met: break out of loop
                         authorized = True
                         break
@@ -417,11 +477,12 @@ class UserMixin(LoginUserMixin):
                 # this is a role_name requirement
                 role_name = requirement
                 # the user must have this role
-                if not role_name in user_roles:
+                if not role_name in user_role_names:
                     return False                    # role_name requirement failed: return False
 
         # All requirements have been met: return True
         return True
+
 
     # Flask-Login is capable of remembering the current user ID in the browser's session.
     # This function enables the user ID to be encrypted as a token.
