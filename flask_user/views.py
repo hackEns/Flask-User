@@ -295,6 +295,7 @@ def cas():
 
 
         url = user_manager.cas_server + "/serviceValidate?ticket=" + ticket + "&service=" + user_manager.cas_service + "%2Fuser%2Fcas%3Fnext=" + next
+        #cas_data = b"<cas:serviceResponse xmlns:cas='http://www.yale.edu/tp/cas'>\n\t<cas:authenticationSuccess>\n\t\t<cas:user>lbaudin</cas:user>\n\n\n\t</cas:authenticationSuccess>\n</cas:serviceResponse>"
         cas_data = urllib.request.urlopen(url, context=ctx).read()
 
         import xml.etree.ElementTree as ET
@@ -312,17 +313,83 @@ def cas():
         if len(user_response) == 1:
             [username] = user_response
             flask_user = user_manager.find_user_by_username(username.text)
-            print(username)
+
+            assert(username.text is str)
+            assert(len(username.text) > 1)
 
 
+            # Immediately redirect already logged in users
+            if current_user.is_authenticated() and user_manager.auto_login_at_login:
+                return redirect(next)
 
-        # Immediately redirect already logged in users
-        if current_user.is_authenticated() and user_manager.auto_login_at_login:
-            return redirect(next)
+            if not flask_user:
+                print("User " + str(username.text) + " not found in our own db, creating a new account.")
+                # Create a User object using Form fields that have a corresponding User field
+                User = db_adapter.UserClass
+                user_class_fields = User.__dict__
+                user_fields = {}
 
-        if flask_user:
-            # Log user in
-            return _do_login_user(flask_user, next, False)
+                # Create a UserAuth object using Form fields that have a corresponding UserAuth field
+                if db_adapter.UserAuthClass:
+                    UserAuth = db_adapter.UserAuthClass
+                    user_auth_class_fields = UserAuth.__dict__
+                    user_auth_fields = {}
+
+                # Enable user account
+                if db_adapter.UserProfileClass:
+                    if hasattr(db_adapter.UserProfileClass, 'active'):
+                        user_auth_fields['active'] = True
+                    elif hasattr(db_adapter.UserProfileClass, 'is_enabled'):
+                        user_auth_fields['is_enabled'] = True
+                    else:
+                        user_auth_fields['is_active'] = True
+                else:
+                    if hasattr(db_adapter.UserClass, 'active'):
+                        user_fields['active'] = True
+                    elif hasattr(db_adapter.UserClass, 'is_enabled'):
+                        user_fields['is_enabled'] = True
+                    else:
+                        user_fields['is_active'] = True
+
+                # For all form fields
+                for field_name, field_value in {"username":username.text}.items():
+                    if field_name in user_class_fields:
+                        user_fields[field_name] = field_value
+                    if db_adapter.UserEmailClass:
+                        if field_name in user_email_class_fields:
+                            user_email_fields[field_name] = field_value
+                    if db_adapter.UserAuthClass:
+                        if field_name in user_auth_class_fields:
+                            user_auth_fields[field_name] = field_value
+
+                # Add User record using named arguments 'user_fields'
+                user = db_adapter.add_object(User, **user_fields)
+                if db_adapter.UserProfileClass:
+                    user_profile = user
+
+                # Add UserEmail record using named arguments 'user_email_fields'
+                if db_adapter.UserEmailClass:
+                    user_email = db_adapter.add_object(UserEmail,
+                            user=user,
+                            is_primary=True,
+                            **user_email_fields)
+                else:
+                    user_email = None
+
+                # Add UserAuth record using named arguments 'user_auth_fields'
+                if db_adapter.UserAuthClass:
+                    user_auth = db_adapter.add_object(UserAuth, **user_auth_fields)
+                    if db_adapter.UserProfileClass:
+                        user = user_auth
+                    else:
+                        user.user_auth = user_auth
+                flask_user = user
+
+                db_adapter.commit()
+
+            if flask_user:
+                # Log user in
+                return _do_login_user(flask_user, next, False)
     return login()
 
 
