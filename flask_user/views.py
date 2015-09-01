@@ -289,14 +289,27 @@ def cas():
 
         import urllib
         import ssl
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
 
         url = user_manager.cas_server + "/serviceValidate?ticket=" + ticket + "&service=" + user_manager.cas_service + "%2Fuser%2Fcas%3Fnext=" + next
         #cas_data = b"<cas:serviceResponse xmlns:cas='http://www.yale.edu/tp/cas'>\n\t<cas:authenticationSuccess>\n\t\t<cas:user>lbaudin</cas:user>\n\n\n\t</cas:authenticationSuccess>\n</cas:serviceResponse>"
-        cas_data = urllib.request.urlopen(url, context=ctx).read()
+        cas_data = None
+
+        #FIXME: the certificate should be checked, unfortunately most of the
+        # time the CAS certificate is self-signed
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            cas_data = urllib.request.urlopen(url, context=ctx).read()
+        # for python2:
+        except AttributeError:
+            try:
+                cas_data = urllib.urlopen(url).read()
+            except IOError:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                cas_data = urllib.urlopen(url, context=ctx).read()
 
         import xml.etree.ElementTree as ET
 
@@ -314,7 +327,7 @@ def cas():
             [username] = user_response
             flask_user = user_manager.find_user_by_username(username.text)
 
-            assert(username.text is str)
+            assert(type(username.text) == str)
             assert(len(username.text) > 1)
 
 
